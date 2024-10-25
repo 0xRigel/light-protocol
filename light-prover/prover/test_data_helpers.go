@@ -196,9 +196,13 @@ func calculateHashChain(hashes []*big.Int, length int) *big.Int {
 		return hashes[0]
 	}
 
+	fmt.Printf("\nHash chain calculation:\n")
+	fmt.Printf("Hashchain[0] = %s\n", hashes[0].String())
+
 	hashChain := hashes[0]
 	for i := 1; i < length; i++ {
 		hashChain, _ = poseidon.Hash([]*big.Int{hashChain, hashes[i]})
+		fmt.Printf("Hashchain[%d] = %s\n", i, hashChain.String())
 	}
 	return hashChain
 }

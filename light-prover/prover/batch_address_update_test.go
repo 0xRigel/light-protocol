@@ -1,6 +1,7 @@
 package prover
 
 import (
+	"fmt"
 	merkletree "light/light-prover/merkle-tree"
 	"math/big"
 	"testing"
@@ -11,10 +12,29 @@ import (
 	iden3_poseidon "github.com/iden3/go-iden3-crypto/poseidon"
 )
 
+func TestBasicUpdate2_2(t *testing.T) {
+	assert := test.NewAssert(t)
+
+	params := BuildTestBatchAddressTreeAppend(2, 2, 0, nil, "")
+	if err := verifyBatchAddressParameters(params); err != nil {
+		t.Fatalf("Invalid test parameters: %v", err)
+	}
+
+	circuit := createAddressCircuit(params)
+	witness := createAddressWitness(params)
+
+	err := test.IsSolved(circuit, witness, ecc.BN254.ScalarField())
+	assert.NoError(err)
+}
+
 func TestBasicUpdate26(t *testing.T) {
 	assert := test.NewAssert(t)
 
 	params := BuildTestBatchAddressTreeAppend(26, 10, 0, nil, "")
+	if err := verifyBatchAddressParameters(params); err != nil {
+		t.Fatalf("Invalid test parameters: %v", err)
+	}
+
 	circuit := createAddressCircuit(params)
 	witness := createAddressWitness(params)
 
@@ -99,7 +119,6 @@ func TestBatchAddressTreeAppendCircuit(t *testing.T) {
 	})
 }
 
-// Test helper functions
 func BuildTestBatchAddressTreeAppend(
 	treeHeight uint32,
 	batchSize uint32,
@@ -107,22 +126,7 @@ func BuildTestBatchAddressTreeAppend(
 	previousParams *BatchAddressTreeAppendParameters,
 	invalidCase string,
 ) *BatchAddressTreeAppendParameters {
-	var tree merkletree.PoseidonTree
-	var oldSubTreeHashChain *big.Int
-	var oldSubtrees []*big.Int
-
-	// Initialize tree
-	if previousParams == nil {
-		tree = merkletree.NewTree(int(treeHeight))
-		oldSubtrees = GetRightmostSubtrees(&tree, int(treeHeight))
-		oldSubTreeHashChain = calculateHashChain(oldSubtrees, int(treeHeight))
-	} else {
-		tree = *previousParams.Tree.DeepCopy()
-		oldSubtrees = GetRightmostSubtrees(&tree, int(treeHeight))
-		oldSubTreeHashChain = previousParams.NewSubTreeHashChain
-	}
-
-	// Generate test data
+	// Initialize test data arrays
 	lowElementValues := make([]*big.Int, batchSize)
 	lowElementNextValues := make([]*big.Int, batchSize)
 	lowElementNextIndices := make([]uint32, batchSize)
@@ -130,59 +134,90 @@ func BuildTestBatchAddressTreeAppend(
 	lowElementPathIndices := make([]uint32, batchSize)
 	newElementValues := make([]*big.Int, batchSize)
 
+	// First, prepare all values
 	for i := uint32(0); i < batchSize; i++ {
-		// Generate base values
-		lowValue := new(big.Int).SetInt64(int64(i * 1000))
-		nextValue := new(big.Int).SetInt64(int64((i + 1) * 1000))
+		pathIndex := startIndex + i
+		lowElementPathIndices[i] = pathIndex
 
+		// Create values that maintain ordering
+		lowElementValues[i] = new(big.Int).Mul(big.NewInt(1000), big.NewInt(int64(pathIndex+1)))
+		lowElementNextIndices[i] = pathIndex + 1
+		lowElementNextValues[i] = new(big.Int).Mul(big.NewInt(1000), big.NewInt(int64(pathIndex+2)))
+		newElementValues[i] = new(big.Int).Add(lowElementValues[i], big.NewInt(500))
+
+		// Apply invalid cases if requested
 		switch invalidCase {
 		case "invalid_tree":
-			lowValue.Add(lowValue, big.NewInt(999999))
+			lowElementValues[i].Add(lowElementValues[i], big.NewInt(999999))
 		case "invalid_range":
 			if i == 0 {
-				nextValue = new(big.Int).Sub(lowValue, big.NewInt(1))
+				newElementValues[i] = new(big.Int).Sub(lowElementValues[i], big.NewInt(1))
 			}
 		case "tree_full":
 			startIndex = 1 << treeHeight
-		default:
-			// Valid case
-			newElementValues[i] = new(big.Int).Add(lowValue, big.NewInt(500))
 		}
-
-		lowElementValues[i] = lowValue
-		lowElementNextValues[i] = nextValue
-		lowElementNextIndices[i] = i + 1
-		lowElementPathIndices[i] = startIndex + i
-
-		// Create and insert low element leaf
-		lowLeaf, _ := iden3_poseidon.Hash([]*big.Int{
-			lowValue,
-			big.NewInt(int64(lowElementNextIndices[i])),
-			nextValue,
-		})
-
-		// Get merkle proof for low element
-		lowElementProofs[i] = tree.Update(int(lowElementPathIndices[i]), *lowLeaf)
 	}
 
-	// Calculate new root and hash chains
-	newRoot := tree.Root.Value()
-	newSubtrees := GetRightmostSubtrees(&tree, int(treeHeight))
-	newSubTreeHashChain := calculateHashChain(newSubtrees, int(treeHeight))
+	// Initialize base tree
+	tree := merkletree.NewTree(int(treeHeight))
+	if previousParams != nil {
+		tree = *previousParams.Tree.DeepCopy()
+	}
 
-	// Calculate hash chain for new leaves
-	var newLeaves []*big.Int
+	// Get proofs one by one
+	fmt.Printf("\nCollecting proofs:\n")
+	lowElementProofs = make([][]big.Int, batchSize)
+
+	for i := uint32(0); i < batchSize; i++ {
+		lowLeaf, _ := iden3_poseidon.Hash([]*big.Int{
+			lowElementValues[i],
+			big.NewInt(int64(lowElementNextIndices[i])),
+			lowElementNextValues[i],
+		})
+		proof := tree.Update(int(lowElementPathIndices[i]), *lowLeaf)
+		lowElementProofs[i] = proof
+	}
+
+	initialRoot := tree.Root.Value()
+	oldSubtrees := GetRightmostSubtrees(&tree, int(treeHeight))
+	oldSubTreeHashChain := calculateHashChain(oldSubtrees, int(treeHeight))
+
+	fmt.Println("Initial Root: ", initialRoot.Text(10))
+
+	newLeaves := make([]*big.Int, batchSize)
 	for i := uint32(0); i < batchSize; i++ {
 		newLeaf, _ := iden3_poseidon.Hash([]*big.Int{
 			newElementValues[i],
 			big.NewInt(int64(lowElementNextIndices[i])),
 			lowElementNextValues[i],
 		})
-		newLeaves = append(newLeaves, newLeaf)
+		newLeaves[i] = newLeaf
+		pathIndex := lowElementPathIndices[i]
+		modifiedLowLeaf, _ := iden3_poseidon.Hash([]*big.Int{
+			lowElementValues[i],
+			big.NewInt(int64(lowElementNextIndices[i])),
+			newElementValues[i],
+		})
+		tree.Update(int(pathIndex), *modifiedLowLeaf)
+		tree.Update(int(pathIndex+1), *newLeaves[i])
 	}
+
 	hashchainHash := calculateHashChain(newLeaves, int(batchSize))
 
-	// Calculate public input hash
+	newRoot := tree.Root.Value()
+	fmt.Println("Root after updates: ", newRoot.Text(10))
+
+	// Calculate final state values
+	newSubtrees := GetRightmostSubtrees(&tree, int(treeHeight))
+
+	for i := range newSubtrees {
+		fmt.Printf("Test Subtree %d: %v\n", i, newSubtrees[i])
+	}
+
+	newSubTreeHashChain := calculateHashChain(newSubtrees, int(treeHeight))
+	fmt.Println("Test newSubTreeHashChain: ", newSubTreeHashChain)
+
+	// Calculate hash chain inputs in circuit order
 	publicInputHash := calculateHashChain([]*big.Int{
 		oldSubTreeHashChain,
 		newSubTreeHashChain,
@@ -209,6 +244,39 @@ func BuildTestBatchAddressTreeAppend(
 		BatchSize:             batchSize,
 		Tree:                  &tree,
 	}
+}
+
+func verifyBatchAddressParameters(params *BatchAddressTreeAppendParameters) error {
+	fmt.Printf("\nVerifying test data:\n")
+
+	// Create verification tree
+	verifyTree := merkletree.NewTree(int(params.TreeHeight))
+
+	// Insert leaves and collect proofs
+	for i := uint32(0); i < params.BatchSize; i++ {
+		// Create low leaf
+		lowLeaf, _ := iden3_poseidon.Hash([]*big.Int{
+			params.LowElementValues[i],
+			big.NewInt(int64(params.LowElementNextIndices[i])),
+			params.LowElementNextValues[i],
+		})
+
+		// Get proof for current leaf
+		proof := verifyTree.Update(int(params.LowElementPathIndices[i]), *lowLeaf)
+
+		// Compare proofs
+		if len(proof) != len(params.LowElementProofs[i]) {
+			return fmt.Errorf("proof length mismatch for element %d", i)
+		}
+
+		for j := range proof {
+			if proof[j].Cmp(&params.LowElementProofs[i][j]) != 0 {
+				return fmt.Errorf("proof mismatch for element %d at level %d", i, j)
+			}
+		}
+	}
+
+	return nil
 }
 
 func createAddressCircuit(params *BatchAddressTreeAppendParameters) *BatchAddressTreeAppendCircuit {
