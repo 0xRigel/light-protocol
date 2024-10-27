@@ -2,6 +2,7 @@ package prover
 
 import (
 	"fmt"
+	iden3_poseidon "github.com/iden3/go-iden3-crypto/poseidon"
 	merkletree "light/light-prover/merkle-tree"
 	"light/light-prover/prover/poseidon"
 	"math/big"
@@ -27,9 +28,11 @@ type BatchAddressTreeAppendCircuit struct {
 	LowElementPathIndices []frontend.Variable   `gnark:",private"`
 	LowElementProofs      [][]frontend.Variable `gnark:",private"`
 
-	// Private inputs for batch append
+	// New elements to insert
 	NewElementValues []frontend.Variable `gnark:",private"`
-	Subtrees         []frontend.Variable `gnark:",private"`
+
+	// Tree state
+	Subtrees []frontend.Variable `gnark:",private"`
 
 	BatchSize  uint32
 	TreeHeight uint32
@@ -49,115 +52,117 @@ func (circuit *BatchAddressTreeAppendCircuit) Define(api frontend.API) error {
 	hashChainInputs[4] = circuit.StartIndex
 
 	publicInputsHashChain := createHashChainCircuit(api, 5, hashChainInputs)
-
-	api.Println("\npublicInputsHashChain Verification:")
-	api.Println("Expected Hash:", publicInputsHashChain)
-	api.Println("Circuit Hash:", publicInputsHashChain)
-
 	api.AssertIsEqual(circuit.PublicInputHash, publicInputsHashChain)
 
-	// 1. Process each low element and validate new elements
+	// 2. Process low elements and insert new elements
+	currentRoot := circuit.processLowElements(api)
+	api.AssertIsEqual(currentRoot, circuit.NewRoot)
+
+	// 3. Verify batch append data
+	// Verify old subtrees hash chain
+	oldSubtreesHashChain := createHashChainCircuit(api, int(circuit.TreeHeight), circuit.Subtrees)
+	api.AssertIsEqual(oldSubtreesHashChain, circuit.OldSubTreeHashChain)
+
+	// Calculate hash chain for new elements
+	newLeaves := circuit.calculateNewLeaves(api)
+	leavesHashChain := createHashChainCircuit(api, int(circuit.BatchSize), newLeaves)
+	api.AssertIsEqual(leavesHashChain, circuit.HashchainHash)
+
+	// 4. Do batch append
+	finalRoot, newSubtrees := circuit.batchAppend(api, newLeaves)
+
+	// 5. Verify results
+	// Verify root matches
+	api.AssertIsEqual(finalRoot, circuit.NewRoot)
+
+	// Verify new subtrees hash chain
+	newSubtreesHashChain := createHashChainCircuit(api, int(circuit.TreeHeight), newSubtrees)
+	api.AssertIsEqual(newSubtreesHashChain, circuit.NewSubTreeHashChain)
+
+	return nil
+}
+
+func (circuit *BatchAddressTreeAppendCircuit) processLowElements(api frontend.API) frontend.Variable {
 	currentRoot := frontend.Variable(0)
 
 	for i := uint32(0); i < circuit.BatchSize; i++ {
-		api.Println("Processing batch element: ", i)
-		api.Println("Current root: ", currentRoot)
 
-		// 1.1 Validate new element
-		// Check that new element value is greater than low element value
+		api.Println("LowElementValues[", i, "] = ", circuit.LowElementValues[i])
+		api.Println("LowElementNextIndices[", i, "] = ", circuit.LowElementNextIndices[i])
+		api.Println("LowElementNextValues[", i, "] = ", circuit.LowElementNextValues[i])
+		api.Println("NewElementValues[", i, "] = ", circuit.NewElementValues[i])
+		// 1. Check value ranges and ordering using LeafHashGadget
+		// For low element verification
+		lowElementLeaf := LeafHashGadget{
+			LeafLowerRangeValue:  circuit.LowElementValues[i],
+			NextIndex:            circuit.LowElementNextIndices[i],
+			LeafHigherRangeValue: circuit.LowElementNextValues[i],
+			Value:                circuit.NewElementValues[i], // Value must be between low and next
+		}
+		oldLeaf := abstractor.Call(api, lowElementLeaf)
 
-		api.Println("Low element: ", circuit.LowElementValues[i])
-		api.Println("New element: ", circuit.NewElementValues[i])
-
-		abstractor.CallVoid(api, AssertIsLess{
-			A: circuit.LowElementValues[i],
-			B: circuit.NewElementValues[i],
-			N: 248,
-		})
-
-		// If next index is not zero, check that new element is less than next value
-		isNextIndexZero := api.IsZero(circuit.LowElementNextIndices[i])
-
-		api.Println("Next index: ", circuit.LowElementNextIndices[i])
-		api.Println("Next value: ", circuit.LowElementNextValues[i])
-
-		// When next index is not zero, enforce that new element is less than next value
-		api.AssertIsEqual(
-			api.Mul(
-				api.Sub(1, isNextIndexZero), // 1 when not zero, 0 when zero
-				api.Sub(circuit.LowElementNextValues[i], circuit.NewElementValues[i]), // should be positive
-			),
-			api.Select(isNextIndexZero, 0, api.Sub(circuit.LowElementNextValues[i], circuit.NewElementValues[i])),
-		)
-
-		// 1.2 Update the tree
-		// First verify the old leaf exists in the tree
-		oldLeaf := abstractor.Call(api, poseidon.Poseidon3{
-			In1: circuit.LowElementValues[i],
-			In2: circuit.LowElementNextIndices[i],
-			In3: circuit.LowElementNextValues[i],
-		})
-
-		api.Println("Old leaf: ", oldLeaf)
-
+		// 2. Verify the old leaf exists in tree
 		oldMerkleRoot := abstractor.Call(api, MerkleRootGadget{
 			Hash:   oldLeaf,
 			Index:  circuit.LowElementPathIndices[i],
 			Path:   circuit.LowElementProofs[i],
 			Height: int(circuit.TreeHeight),
 		})
-		api.Println("Computed old root: ", oldMerkleRoot)
 
-		// Update with modified low leaf
-		newLowLeaf := abstractor.Call(api, poseidon.Poseidon3{
-			In1: circuit.LowElementValues[i],
-			In2: circuit.LowElementNextIndices[i],
-			In3: circuit.NewElementValues[i],
-		})
+		// Root consistency check
+		if i > 0 {
+			api.AssertIsEqual(oldMerkleRoot, currentRoot)
+		} else {
+			currentRoot = oldMerkleRoot
+		}
 
-		api.Println("New low leaf: ", newLowLeaf)
+		// 3. Create new low element leaf (pointing to new element)
+		newLowIndex := api.Add(circuit.StartIndex, i+1)
+		newLowLeaf := LeafHashGadget{
+			LeafLowerRangeValue:  circuit.LowElementValues[i], // Same value
+			NextIndex:            newLowIndex,                 // Points to new element
+			LeafHigherRangeValue: circuit.NewElementValues[i], // Points to new value
+			Value:                circuit.NewElementValues[i], // For verification
+		}
+		newLowLeafHash := abstractor.Call(api, newLowLeaf)
 
-		// Use MerkleRootUpdateGadget to verify and update the root
-		currentRoot = abstractor.Call(api, MerkleRootUpdateGadget{
-			OldRoot:     oldMerkleRoot,
-			OldLeaf:     oldLeaf,
-			NewLeaf:     newLowLeaf,
-			PathIndex:   circuit.LowElementPathIndices[i],
-			MerkleProof: circuit.LowElementProofs[i],
-			Height:      int(circuit.TreeHeight),
-		})
-
-		api.Println("Root after low leaf update: ", currentRoot)
-
-		// Add the new element
-		newLeaf := abstractor.Call(api, poseidon.Poseidon3{
-			In1: circuit.NewElementValues[i],
-			In2: circuit.LowElementNextIndices[i],
-			In3: circuit.LowElementNextValues[i],
-		})
-
-		api.Println("New leaf: ", newLeaf)
-
+		// Update tree with modified low element
 		currentRoot = abstractor.Call(api, MerkleRootUpdateGadget{
 			OldRoot:     currentRoot,
-			OldLeaf:     newLowLeaf,
-			NewLeaf:     newLeaf,
+			OldLeaf:     oldLeaf,
+			NewLeaf:     newLowLeafHash,
 			PathIndex:   circuit.LowElementPathIndices[i],
 			MerkleProof: circuit.LowElementProofs[i],
 			Height:      int(circuit.TreeHeight),
 		})
 
-		api.Println("Final root after new leaf update: ", currentRoot)
+		// 4. Create new element leaf
+		newElementLeaf := LeafHashGadget{
+			LeafLowerRangeValue:  circuit.NewElementValues[i],      // New value
+			NextIndex:            circuit.LowElementNextIndices[i], // Original next index
+			LeafHigherRangeValue: circuit.LowElementNextValues[i],  // Original next value
+			Value:                circuit.LowElementNextValues[i],  // For verification
+		}
+		newLeafHash := abstractor.Call(api, newElementLeaf)
+
+		// Insert new element in tree
+		currentRoot = abstractor.Call(api, MerkleRootUpdateGadget{
+			OldRoot:     currentRoot,
+			OldLeaf:     newLowLeafHash,
+			NewLeaf:     newLeafHash,
+			PathIndex:   newLowIndex,
+			MerkleProof: circuit.LowElementProofs[i],
+			Height:      int(circuit.TreeHeight),
+		})
 	}
 
-	// 2. Batch append
-	api.Println("Batch append")
-	oldSubtreesHashChain := createHashChainCircuit(api, int(circuit.TreeHeight), circuit.Subtrees)
-	api.Println("Old subtrees hash chain: ", oldSubtreesHashChain)
-	api.Println("Expected old subtrees hash chain: ", circuit.OldSubTreeHashChain)
-	api.AssertIsEqual(oldSubtreesHashChain, circuit.OldSubTreeHashChain)
+	return currentRoot
+}
 
+// calculateNewLeaves creates leaf hashes for the new elements
+func (circuit *BatchAddressTreeAppendCircuit) calculateNewLeaves(api frontend.API) []frontend.Variable {
 	newLeaves := make([]frontend.Variable, circuit.BatchSize)
+
 	for i := uint32(0); i < circuit.BatchSize; i++ {
 		newLeaves[i] = abstractor.Call(api, poseidon.Poseidon3{
 			In1: circuit.NewElementValues[i],
@@ -166,25 +171,7 @@ func (circuit *BatchAddressTreeAppendCircuit) Define(api frontend.API) error {
 		})
 	}
 
-	leavesHashChain := createHashChainCircuit(api, int(circuit.BatchSize), newLeaves)
-	api.Println("Leaves hash chain: ", leavesHashChain)
-	api.Println("Expected leaves hash chain: ", circuit.HashchainHash)
-	api.AssertIsEqual(leavesHashChain, circuit.HashchainHash)
-
-	finalRoot, newSubtrees := circuit.batchAppend(api, newLeaves)
-	api.Println("Final root after batch append: ", finalRoot)
-	api.Println("Circuit's new root: ", circuit.NewRoot)
-	api.Println("Current root", currentRoot)
-	//api.AssertIsEqual(finalRoot, currentRoot)
-
-	for i := 0; i < int(circuit.TreeHeight); i++ {
-		api.Println("Subtree", i, ":", newSubtrees[i])
-	}
-
-	newSubtreesHashChain := createHashChainCircuit(api, int(circuit.TreeHeight), newSubtrees)
-	api.AssertIsEqual(newSubtreesHashChain, circuit.NewSubTreeHashChain)
-
-	return nil
+	return newLeaves
 }
 
 // Circuit helper functions
@@ -232,6 +219,7 @@ func createHashChainCircuit(api frontend.API, length int, inputs []frontend.Vari
 	return hashChain
 }
 
+// batchAppend performs the batch append operation
 func (circuit *BatchAddressTreeAppendCircuit) batchAppend(
 	api frontend.API,
 	leaves []frontend.Variable,
@@ -243,22 +231,21 @@ func (circuit *BatchAddressTreeAppendCircuit) batchAppend(
 	newRoot := frontend.Variable(0)
 
 	for i := 0; i < int(circuit.BatchSize); i++ {
-		leaf := leaves[i]
-		pathIndex := circuit.LowElementPathIndices[i]
-		newRoot, currentSubtrees = circuit.append(api, leaf, currentSubtrees, pathIndex)
+		pathIndex := api.Add(circuit.StartIndex, i+1)
+		newRoot, currentSubtrees = circuit.appendSingle(api, leaves[i], currentSubtrees, pathIndex)
 		indexBits = circuit.incrementBits(api, indexBits)
 	}
 
 	return newRoot, currentSubtrees
 }
 
-func (circuit *BatchAddressTreeAppendCircuit) append(
+// appendSingle appends a single leaf to the tree
+func (circuit *BatchAddressTreeAppendCircuit) appendSingle(
 	api frontend.API,
 	leaf frontend.Variable,
 	subtrees []frontend.Variable,
 	pathIndex frontend.Variable,
 ) (frontend.Variable, []frontend.Variable) {
-
 	newSubtrees := make([]frontend.Variable, len(subtrees))
 	copy(newSubtrees, subtrees)
 
@@ -277,6 +264,7 @@ func (circuit *BatchAddressTreeAppendCircuit) append(
 			Height: 1,
 		})
 	}
+
 	return currentNode, newSubtrees
 }
 
@@ -297,9 +285,14 @@ func (circuit *BatchAddressTreeAppendCircuit) getZeroValue(api frontend.API, lev
 	return frontend.Variable(new(big.Int).SetBytes(ZERO_BYTES[level][:]))
 }
 
-// Parameters struct
+type IndexedElement struct {
+	Value     *big.Int
+	NextValue *big.Int
+	NextIndex uint32
+	Index     uint32
+}
+
 type BatchAddressTreeAppendParameters struct {
-	// Public inputs
 	PublicInputHash     *big.Int
 	OldSubTreeHashChain *big.Int
 	NewSubTreeHashChain *big.Int
@@ -307,18 +300,21 @@ type BatchAddressTreeAppendParameters struct {
 	HashchainHash       *big.Int
 	StartIndex          uint32
 
-	// Low elements data
-	LowElementValues      []*big.Int
-	LowElementNextValues  []*big.Int
-	LowElementNextIndices []uint32
-	LowElementProofs      [][]big.Int
-	LowElementPathIndices []uint32
+	LowElements      []IndexedElement
+	NewElements      []IndexedElement
+	LowElementProofs [][]big.Int
 
-	// New elements
-	NewElementValues []*big.Int
-	Subtrees         []*big.Int
+	Subtrees []*big.Int
 
 	TreeHeight uint32
 	BatchSize  uint32
 	Tree       *merkletree.PoseidonTree
+}
+
+func hashIndexedElement(element *IndexedElement) (*big.Int, error) {
+	return iden3_poseidon.Hash([]*big.Int{
+		element.Value,
+		big.NewInt(int64(element.NextIndex)),
+		element.NextValue,
+	})
 }
