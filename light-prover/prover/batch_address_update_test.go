@@ -219,9 +219,9 @@ func BuildTestBatchAddressTreeAppend(
 
 	// Calculate tree state values
 	newRoot := tree.Root.Value()
-	oldSubtrees := GetRightmostSubtrees(&tree, int(treeHeight))
+	oldSubtrees := tree.GetRightmostSubtrees(int(treeHeight))
 	oldSubTreeHashChain := calculateHashChain(oldSubtrees, int(treeHeight))
-	newSubtrees := GetRightmostSubtrees(&tree, int(treeHeight))
+	newSubtrees := tree.GetRightmostSubtrees(int(treeHeight))
 	newSubTreeHashChain := calculateHashChain(newSubtrees, int(treeHeight))
 
 	// Calculate hash chain for new leaves

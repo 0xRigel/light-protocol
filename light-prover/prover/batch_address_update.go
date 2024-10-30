@@ -282,7 +282,7 @@ func (circuit *BatchAddressTreeAppendCircuit) incrementBits(
 }
 
 func (circuit *BatchAddressTreeAppendCircuit) getZeroValue(api frontend.API, level int) frontend.Variable {
-	return frontend.Variable(new(big.Int).SetBytes(ZERO_BYTES[level][:]))
+	return frontend.Variable(new(big.Int).SetBytes(merkletree.ZERO_BYTES[level][:]))
 }
 
 type IndexedElement struct {

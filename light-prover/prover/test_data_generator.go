@@ -1,8 +1,7 @@
-package merkle_tree
+package prover
 
 import (
 	"fmt"
-	"light/light-prover/prover"
 	"math/big"
 	"os"
 	"testing"
@@ -101,7 +100,7 @@ func TestCombined(t *testing.T) {
 			trees2 := MakeTestNonInclusionTrees(testTreeHeight[i], testCompressedAccountCount[j])
 			for k, tree1 := range trees1 {
 				for l, tree2 := range trees2 {
-					var combinedParams = prover.CombinedParameters{
+					var combinedParams = CombinedParameters{
 						InclusionParameters:    tree1.Tree,
 						NonInclusionParameters: tree2.Tree,
 					}
@@ -132,7 +131,7 @@ func flag(valid bool) int {
 }
 
 type InclusionTreeValidPair struct {
-	Tree  prover.InclusionParameters
+	Tree  InclusionParameters
 	Valid bool
 }
 
@@ -214,7 +213,7 @@ func MakeTestIncludedTrees(height int, numberOfCompressedAccounts int) []Inclusi
 }
 
 type NonInclusionTreeValidPair struct {
-	Tree  prover.NonInclusionParameters
+	Tree  NonInclusionParameters
 	Valid bool
 }
 

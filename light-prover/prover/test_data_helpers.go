@@ -112,11 +112,11 @@ func BuildAndUpdateBatchAppendParameters(treeDepth uint32, batchSize uint32, sta
 			leaf, _ := poseidon.Hash([]*big.Int{big.NewInt(int64(i))})
 			tree.Update(int(i), *leaf)
 		}
-		oldSubtrees = GetRightmostSubtrees(&tree, int(treeDepth))
+		oldSubtrees = tree.GetRightmostSubtrees(int(treeDepth))
 		oldSubTreeHashChain = calculateHashChain(oldSubtrees, int(treeDepth))
 	} else {
 		tree = *previousParams.tree.DeepCopy()
-		oldSubtrees = GetRightmostSubtrees(&tree, int(treeDepth))
+		oldSubtrees = tree.GetRightmostSubtrees(int(treeDepth))
 		oldSubTreeHashChain = previousParams.NewSubTreeHashChain
 	}
 
@@ -128,7 +128,7 @@ func BuildAndUpdateBatchAppendParameters(treeDepth uint32, batchSize uint32, sta
 		tree.Update(int(startIndex)+int(i), *leaf)
 	}
 
-	newSubtrees := GetRightmostSubtrees(&tree, int(treeDepth))
+	newSubtrees := tree.GetRightmostSubtrees(int(treeDepth))
 	newSubTreeHashChain := calculateHashChain(newSubtrees, int(treeDepth))
 	newRoot := tree.Root.Value()
 	hashchainHash := calculateHashChain(newLeaves, int(batchSize))
@@ -154,38 +154,6 @@ func BuildAndUpdateBatchAppendParameters(treeDepth uint32, batchSize uint32, sta
 	}
 
 	return params
-}
-
-func GetRightmostSubtrees(tree *merkletree.PoseidonTree, depth int) []*big.Int {
-	subtrees := make([]*big.Int, depth)
-	for i := 0; i < depth; i++ {
-		subtrees[i] = new(big.Int).SetBytes(ZERO_BYTES[i][:])
-	}
-
-	/*
-		start at top x
-		take left child hash as subtree
-		if right node is not zero value, go down right
-		if right node is zero value go down left node
-	*/
-
-	if fullNode, ok := tree.Root.(*merkletree.PoseidonFullNode); ok {
-		current := fullNode
-		level := depth - 1
-		for current != nil && level >= 0 {
-			if fullLeft, ok := current.Left.(*merkletree.PoseidonFullNode); ok {
-				value := fullLeft.Value()
-				subtrees[level] = &value
-				if fullRight, ok := current.Right.(*merkletree.PoseidonFullNode); ok {
-					current = fullRight
-				} else {
-					current = fullLeft
-				}
-			}
-			level--
-		}
-	}
-	return subtrees
 }
 
 func calculateHashChain(hashes []*big.Int, length int) *big.Int {
