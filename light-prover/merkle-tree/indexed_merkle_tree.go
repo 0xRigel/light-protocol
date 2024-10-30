@@ -116,69 +116,70 @@ func (ia *IndexedArray) Append(value *big.Int) error {
 
 	return nil
 }
+func (ia *IndexedArray) findLowElementIndex(value *big.Int) uint32 {
+	maxAddr, _ := new(big.Int).SetString("452312848583266388373324160190187140051835877600158453279131187530910662655", 10)
 
-func (imt *IndexedMerkleTree) Init() error {
-	if err := imt.indexArray.Init(); err != nil {
-		return fmt.Errorf("failed to init array: %v", err)
+	for i, element := range ia.elements {
+		if element.Value.Cmp(maxAddr) == 0 {
+			continue
+		}
+
+		if element.NextIndex == 0 {
+			return uint32(i)
+		}
+
+		nextElement := ia.Get(element.NextIndex)
+		if element.Value.Cmp(value) < 0 && nextElement.Value.Cmp(value) > 0 {
+			return uint32(i)
+		}
 	}
-	element0 := imt.indexArray.Get(0)
-	element1 := imt.indexArray.Get(1)
 
-	lowLeaf, err := poseidon.Hash([]*big.Int{
-		element0.Value,
-		big.NewInt(int64(element0.NextIndex)),
-		element1.Value,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create low leaf: %v", err)
-	}
-	imt.tree.Update(0, *lowLeaf)
-
-	maxLeaf, err := poseidon.Hash([]*big.Int{
-		element1.Value,
-		big.NewInt(int64(element1.NextIndex)),
-		big.NewInt(0),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to hash max leaf: %v", err)
-	}
-	imt.tree.Update(1, *maxLeaf)
-
-	return nil
+	return uint32(0)
 }
 
 func (imt *IndexedMerkleTree) Append(value *big.Int) error {
 	lowElementIndex := imt.indexArray.findLowElementIndex(value)
 	lowElement := imt.indexArray.Get(lowElementIndex)
 
-	newElementIndex := uint32(len(imt.indexArray.elements))
-	newElement := &IndexedElement{
-		Value:     value,
-		NextValue: lowElement.NextValue,
-		NextIndex: lowElement.NextIndex,
-		Index:     newElementIndex,
-	}
-	newLowElement := &IndexedElement{
-		Value:     lowElement.Value,
-		NextValue: value,
-		NextIndex: newElementIndex,
-		Index:     lowElement.Index,
+	var nextElement *IndexedElement
+	if lowElement.NextIndex != 0 {
+		nextElement = imt.indexArray.Get(lowElement.NextIndex)
+		if value.Cmp(nextElement.Value) >= 0 {
+			return fmt.Errorf("new value must be less than next element value")
+		}
 	}
 
-	lowLeafHash, err := hashIndexedElement(newLowElement)
+	newElementIndex := uint32(len(imt.indexArray.elements))
+
+	bundle := IndexedElementBundle{
+		NewLowElement: IndexedElement{
+			Value:     lowElement.Value,
+			NextValue: value,
+			NextIndex: newElementIndex,
+			Index:     lowElement.Index,
+		},
+		NewElement: IndexedElement{
+			Value:     value,
+			NextValue: nextElement.Value,
+			NextIndex: lowElement.NextIndex,
+			Index:     newElementIndex,
+		},
+	}
+
+	lowLeafHash, err := hashIndexedElement(&bundle.NewLowElement)
 	if err != nil {
 		return fmt.Errorf("failed to hash low leaf: %v", err)
 	}
 	imt.tree.Update(int(lowElement.Index), *lowLeafHash)
 
-	newLeafHash, err := hashIndexedElement(newElement)
+	newLeafHash, err := hashIndexedElement(&bundle.NewElement)
 	if err != nil {
 		return fmt.Errorf("failed to hash new leaf: %v", err)
 	}
 	imt.tree.Update(int(newElementIndex), *newLeafHash)
 
-	imt.indexArray.elements[lowElement.Index] = *newLowElement
-	imt.indexArray.elements = append(imt.indexArray.elements, *newElement)
+	imt.indexArray.elements[lowElement.Index] = bundle.NewLowElement
+	imt.indexArray.elements = append(imt.indexArray.elements, bundle.NewElement)
 	imt.indexArray.currentNodeIndex = newElementIndex
 	if lowElement.NextIndex == 0 {
 		imt.indexArray.highestNodeIndex = newElementIndex
@@ -187,16 +188,44 @@ func (imt *IndexedMerkleTree) Append(value *big.Int) error {
 	return nil
 }
 
-func (ia *IndexedArray) findLowElementIndex(value *big.Int) uint32 {
-	var lowIndex uint32
-	for i, element := range ia.elements {
-		if element.NextIndex == 0 ||
-			(element.Value.Cmp(value) < 0 && ia.elements[element.NextIndex].Value.Cmp(value) > 0) {
-			lowIndex = uint32(i)
-			break
-		}
+func (imt *IndexedMerkleTree) Init() error {
+	maxAddr, ok := new(big.Int).SetString("452312848583266388373324160190187140051835877600158453279131187530910662655", 10)
+	if !ok {
+		return fmt.Errorf("failed to parse HIGHEST_ADDRESS_PLUS_ONE")
 	}
-	return lowIndex
+
+	bundle := IndexedElementBundle{
+		NewLowElement: IndexedElement{
+			Value:     big.NewInt(0),
+			NextValue: maxAddr,
+			NextIndex: 1,
+			Index:     0,
+		},
+		NewElement: IndexedElement{
+			Value:     maxAddr,
+			NextValue: big.NewInt(0),
+			NextIndex: 0,
+			Index:     1,
+		},
+	}
+
+	lowLeafHash, err := hashIndexedElement(&bundle.NewLowElement)
+	if err != nil {
+		return fmt.Errorf("failed to hash low leaf: %v", err)
+	}
+	imt.tree.Update(0, *lowLeafHash)
+
+	maxLeafHash, err := hashIndexedElement(&bundle.NewElement)
+	if err != nil {
+		return fmt.Errorf("failed to hash max leaf: %v", err)
+	}
+	imt.tree.Update(1, *maxLeafHash)
+
+	imt.indexArray.elements = []IndexedElement{bundle.NewLowElement, bundle.NewElement}
+	imt.indexArray.currentNodeIndex = 1
+	imt.indexArray.highestNodeIndex = 1
+
+	return nil
 }
 
 func hashIndexedElement(element *IndexedElement) (*big.Int, error) {
