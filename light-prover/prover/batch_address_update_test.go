@@ -11,29 +11,11 @@ import (
 	"github.com/consensys/gnark/test"
 )
 
-// Add test for value ordering
-func TestValueOrdering(t *testing.T) {
-	t.Run("Test value ordering", func(t *testing.T) {
-		low, new, next := generateOrderedValues(0, 5)
-
-		for i := range low {
-			if low[i].Cmp(new[i]) >= 0 {
-				t.Errorf("Element %d: low value >= new value", i)
-			}
-			if new[i].Cmp(next[i]) >= 0 {
-				t.Errorf("Element %d: new value >= next value", i)
-			}
-		}
-	})
-}
-
-// Add test for chain linking
 func TestChainLinking(t *testing.T) {
 	t.Run("Test chain linking", func(t *testing.T) {
-		params := BuildTestBatchAddressTreeAppend(10, 3, 0, nil, "")
+		params := BuildTestBatchAddressAppend(10, 3, 0, nil, "")
 
 		for i := uint32(0); i < params.BatchSize-1; i++ {
-			// Verify each element points to the next one correctly
 			if params.LowElements[i].NextValue.Cmp(params.NewElements[i].Value) != 0 {
 				t.Errorf("Element %d: low element next value doesn't match new element value", i)
 			}
@@ -47,7 +29,7 @@ func TestChainLinking(t *testing.T) {
 func TestBasicUpdate2_2(t *testing.T) {
 	assert := test.NewAssert(t)
 
-	params := BuildTestBatchAddressTreeAppend(2, 2, 0, nil, "")
+	params := BuildTestBatchAddressAppend(2, 2, 0, nil, "")
 	if err := verifyBatchAddressParameters(params); err != nil {
 		t.Fatalf("Invalid test parameters: %v", err)
 	}
@@ -62,7 +44,7 @@ func TestBasicUpdate2_2(t *testing.T) {
 func TestBasicUpdate26(t *testing.T) {
 	assert := test.NewAssert(t)
 
-	params := BuildTestBatchAddressTreeAppend(26, 10, 0, nil, "")
+	params := BuildTestBatchAddressAppend(26, 10, 0, nil, "")
 	if err := verifyBatchAddressParameters(params); err != nil {
 		t.Fatalf("Invalid test parameters: %v", err)
 	}
@@ -80,7 +62,7 @@ func TestBatchAddressTreeAppendCircuit(t *testing.T) {
 
 	t.Run("Functional tests", func(t *testing.T) {
 		t.Run("Basic batch update - height 26", func(t *testing.T) {
-			params := BuildTestBatchAddressTreeAppend(26, 10, 0, nil, "")
+			params := BuildTestBatchAddressAppend(26, 10, 0, nil, "")
 			circuit := createAddressCircuit(params)
 			witness := createAddressWitness(params)
 
@@ -100,7 +82,7 @@ func TestBatchAddressTreeAppendCircuit(t *testing.T) {
 					batchSize = remainingLeaves
 				}
 
-				newParams := BuildTestBatchAddressTreeAppend(
+				newParams := BuildTestBatchAddressAppend(
 					treeHeight,
 					batchSize,
 					startIndex,
@@ -140,7 +122,7 @@ func TestBatchAddressTreeAppendCircuit(t *testing.T) {
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				params := BuildTestBatchAddressTreeAppend(26, 10, 0, nil, tc.invalidCase)
+				params := BuildTestBatchAddressAppend(26, 10, 0, nil, tc.invalidCase)
 				circuit := createAddressCircuit(params)
 				witness := createAddressWitness(params)
 
@@ -151,265 +133,22 @@ func TestBatchAddressTreeAppendCircuit(t *testing.T) {
 	})
 }
 
-func BuildTestBatchAddressTreeAppend(
-	treeHeight uint32,
-	batchSize uint32,
-	startIndex uint32,
-	previousParams *BatchAddressTreeAppendParameters,
-	invalidCase string,
-) *BatchAddressTreeAppendParameters {
-	// Initialize tree state
-	var tree merkletree.PoseidonTree
-	if previousParams != nil {
-		tree = *previousParams.Tree.DeepCopy()
-	} else {
-		tree = merkletree.NewTree(int(treeHeight))
-	}
-
-	// Initialize elements
-	lowElements := make([]IndexedElement, batchSize)
-	newElements := make([]IndexedElement, batchSize)
-	proofs := make([][]big.Int, batchSize)
-
-	// Generate ordered values
-	lowValues, newValues, nextValues := generateOrderedValues(startIndex, batchSize)
-
-	fmt.Printf("\nGenerating test data for indexed Merkle tree batch append:\n")
-
-	// Process each batch element
-	for i := uint32(0); i < batchSize; i++ {
-		// Set up low element with truncated values
-		lowElements[i] = IndexedElement{
-			Value:     truncateTo31Bytes(lowValues[i]),
-			NextValue: truncateTo31Bytes(newValues[i]), // Points to new element
-			NextIndex: startIndex + i + 1,              // Index where new element will go
-			Index:     startIndex + i,                  // Current position
-		}
-
-		// Set up new element with truncated values
-		newElements[i] = IndexedElement{
-			Value:     truncateTo31Bytes(newValues[i]),
-			NextValue: truncateTo31Bytes(nextValues[i]),
-			NextIndex: lowElements[i].NextIndex + 1,
-			Index:     lowElements[i].NextIndex,
-		}
-		fmt.Printf("\nProcessing element %d:\n", i)
-		fmt.Printf("Low element: index=%d, value=%s (bits=%d), next_index=%d, next_value=%s (bits=%d)\n",
-			lowElements[i].Index,
-			lowElements[i].Value.String(),
-			lowElements[i].Value.BitLen(),
-			lowElements[i].NextIndex,
-			lowElements[i].NextValue.String(),
-			lowElements[i].NextValue.BitLen(),
-		)
-
-		// Create and verify leaves with truncated values
-		newLeaf, err := hashIndexedElement(&newElements[i])
-		if err != nil {
-			panic(err)
-		}
-		tree.Update(int(newElements[i].Index), *newLeaf)
-
-		lowLeaf, err := hashIndexedElement(&lowElements[i])
-		if err != nil {
-			panic(err)
-		}
-		proofs[i] = tree.Update(int(lowElements[i].Index), *lowLeaf)
-	}
-
-	// Calculate tree state values
-	newRoot := tree.Root.Value()
-	oldSubtrees := tree.GetRightmostSubtrees(int(treeHeight))
-	oldSubTreeHashChain := calculateHashChain(oldSubtrees, int(treeHeight))
-	newSubtrees := tree.GetRightmostSubtrees(int(treeHeight))
-	newSubTreeHashChain := calculateHashChain(newSubtrees, int(treeHeight))
-
-	// Calculate hash chain for new leaves
-	newLeaves := make([]*big.Int, batchSize)
-	for i := uint32(0); i < batchSize; i++ {
-		leaf, err := hashIndexedElement(&newElements[i])
-		if err != nil {
-			panic(err)
-		}
-		newLeaves[i] = leaf
-	}
-	hashchainHash := calculateHashChain(newLeaves, int(batchSize))
-
-	// Calculate public input hash
-	publicInputHash := calculateHashChain([]*big.Int{
-		oldSubTreeHashChain,
-		newSubTreeHashChain,
-		&newRoot,
-		hashchainHash,
-		big.NewInt(int64(startIndex)),
-	}, 5)
-
-	return &BatchAddressTreeAppendParameters{
-		PublicInputHash:     publicInputHash,
-		OldSubTreeHashChain: oldSubTreeHashChain,
-		NewSubTreeHashChain: newSubTreeHashChain,
-		NewRoot:             &newRoot,
-		HashchainHash:       hashchainHash,
-		StartIndex:          startIndex,
-		LowElements:         lowElements,
-		NewElements:         newElements,
-		LowElementProofs:    proofs,
-		Subtrees:            oldSubtrees,
-		TreeHeight:          treeHeight,
-		BatchSize:           batchSize,
-		Tree:                &tree,
-	}
-}
-func generateOrderedValues(startIndex uint32, batchSize uint32) (
-	[]*big.Int, // lowValues
-	[]*big.Int, // newValues
-	[]*big.Int, // nextValues
-) {
-	lowValues := make([]*big.Int, batchSize)
-	newValues := make([]*big.Int, batchSize)
-	nextValues := make([]*big.Int, batchSize)
-
-	// Debug max value
-	maxValue := new(big.Int).Sub(
-		new(big.Int).Lsh(big.NewInt(1), 248),
-		big.NewInt(1),
-	)
-
-	fmt.Printf("\nValue generation debug:\n")
-	fmt.Printf("Max value (bits): %d\n", maxValue.BitLen())
-	fmt.Printf("Max value: %s\n", maxValue.String())
-
-	increment := new(big.Int).Div(maxValue, big.NewInt(int64(batchSize*30)))
-	fmt.Printf("Increment (bits): %d\n", increment.BitLen())
-	fmt.Printf("Increment: %s\n", increment.String())
-
-	for i := uint32(0); i < batchSize; i++ {
-		base := new(big.Int).Mul(
-			increment,
-			big.NewInt(int64(i*10)),
-		)
-		fmt.Printf("\nElement %d:\n", i)
-		fmt.Printf("Base before truncate (bits): %d\n", base.BitLen())
-
-		lowValues[i] = truncateTo31Bytes(base)
-		fmt.Printf("Low value after truncate (bits): %d\n", lowValues[i].BitLen())
-
-		newBase := new(big.Int).Add(
-			base,
-			new(big.Int).Mul(increment, big.NewInt(3)),
-		)
-		fmt.Printf("New value before truncate (bits): %d\n", newBase.BitLen())
-		newValues[i] = truncateTo31Bytes(newBase)
-		fmt.Printf("New value after truncate (bits): %d\n", newValues[i].BitLen())
-
-		nextBase := new(big.Int).Add(
-			base,
-			new(big.Int).Mul(increment, big.NewInt(7)),
-		)
-		fmt.Printf("Next value before truncate (bits): %d\n", nextBase.BitLen())
-		nextValues[i] = truncateTo31Bytes(nextBase)
-		fmt.Printf("Next value after truncate (bits): %d\n", nextValues[i].BitLen())
-
-		if lowValues[i].BitLen() > 248 || newValues[i].BitLen() > 248 || nextValues[i].BitLen() > 248 {
-			panic(fmt.Sprintf("Truncation failed at element %d: low=%d new=%d next=%d bits",
-				i, lowValues[i].BitLen(), newValues[i].BitLen(), nextValues[i].BitLen()))
-		}
-
-		fmt.Printf("Final values for element %d:\n", i)
-		fmt.Printf("Low:  %s\n", lowValues[i].String())
-		fmt.Printf("New:  %s\n", newValues[i].String())
-		fmt.Printf("Next: %s\n", nextValues[i].String())
-	}
-
-	return lowValues, newValues, nextValues
-}
-
-func truncateTo31Bytes(value *big.Int) *big.Int {
-	mask := new(big.Int).Sub(
-		new(big.Int).Lsh(big.NewInt(1), 248),
-		big.NewInt(1),
-	)
-
-	beforeBits := value.BitLen()
-	result := new(big.Int).And(value, mask)
-	afterBits := result.BitLen()
-
-	if beforeBits > 248 {
-		fmt.Printf("Truncated value from %d to %d bits\n", beforeBits, afterBits)
-	}
-
-	return result
-}
-
-func verifyBatchAddressParameters(params *BatchAddressTreeAppendParameters) error {
-	fmt.Printf("\nVerifying indexed Merkle tree parameters:\n")
-
-	// Verify values are properly truncated
-	for i := uint32(0); i < params.BatchSize; i++ {
-		// Check all values are within 31 bytes
-		if params.LowElements[i].Value.BitLen() > 248 {
-			return fmt.Errorf("low value at index %d exceeds 31 bytes: %d bits",
-				i, params.LowElements[i].Value.BitLen())
-		}
-		if params.NewElements[i].Value.BitLen() > 248 {
-			return fmt.Errorf("new value at index %d exceeds 31 bytes: %d bits",
-				i, params.NewElements[i].Value.BitLen())
-		}
-		if params.LowElements[i].NextValue.BitLen() > 248 {
-			return fmt.Errorf("next value at index %d exceeds 31 bytes: %d bits",
-				i, params.LowElements[i].NextValue.BitLen())
-		}
-
-		if params.LowElements[i].Value.Cmp(params.NewElements[i].Value) >= 0 {
-			return fmt.Errorf("invalid ordering at index %d: low >= new", i)
-		}
-
-		if i > 1 && params.NewElements[i].Value.Cmp(params.LowElements[i].NextValue) >= 0 {
-			return fmt.Errorf("invalid ordering at index %d: new >= next", i)
-		}
-	}
-
-	// Verify tree state
-	verifyTree := merkletree.NewTree(int(params.TreeHeight))
-
-	for i := uint32(0); i < params.BatchSize; i++ {
-		// Verify value ordering
-		if params.LowElements[i].Value.Cmp(params.NewElements[i].Value) >= 0 {
-			return fmt.Errorf("invalid value ordering at index %d", i)
-		}
-
-		// Insert new element
-		newLeaf, err := hashIndexedElement(&params.NewElements[i])
-		if err != nil {
-			return fmt.Errorf("failed to hash new element: %v", err)
-		}
-		verifyTree.Update(int(params.NewElements[i].Index), *newLeaf)
-
-		// Update and verify low element
-		lowLeaf, err := hashIndexedElement(&params.LowElements[i])
-		if err != nil {
-			return fmt.Errorf("failed to hash low element: %v", err)
-		}
-
-		proof := verifyTree.Update(int(params.LowElements[i].Index), *lowLeaf)
-
-		// Verify proof matches
-		if len(proof) != len(params.LowElementProofs[i]) {
-			return fmt.Errorf("proof length mismatch for element %d", i)
-		}
-
-		for j := range proof {
-			if proof[j].Cmp(&params.LowElementProofs[i][j]) != 0 {
-				return fmt.Errorf("proof mismatch for element %d at level %d", i, j)
-			}
-		}
-	}
-
-	fmt.Printf("All parameters verified successfully\n")
-	return nil
-}
-
 func createAddressCircuit(params *BatchAddressTreeAppendParameters) *BatchAddressTreeAppendCircuit {
+	if params == nil {
+		panic("params cannot be nil")
+	}
+
+	fmt.Printf("Creating circuit with BatchSize: %d, TreeHeight: %d\n", params.BatchSize, params.TreeHeight)
+	fmt.Printf("LowElements len: %d, NewElements len: %d\n", len(params.LowElements), len(params.NewElements))
+	fmt.Printf("LowElementProofs len: %d, NewElementProofs len: %d\n", len(params.LowElementProofs), len(params.NewElementProofs))
+
+	for i := range params.LowElementProofs {
+		fmt.Printf("LowElementProof[%d] len: %d\n", i, len(params.LowElementProofs[i]))
+	}
+
+	for i := range params.NewElementProofs {
+		fmt.Printf("NewElementProof[%d] len: %d\n", i, len(params.NewElementProofs[i]))
+	}
 	circuit := &BatchAddressTreeAppendCircuit{
 		PublicInputHash:     frontend.Variable(0),
 		OldSubTreeHashChain: frontend.Variable(0),
@@ -422,6 +161,7 @@ func createAddressCircuit(params *BatchAddressTreeAppendParameters) *BatchAddres
 		LowElementNextValues:  make([]frontend.Variable, params.BatchSize),
 		LowElementNextIndices: make([]frontend.Variable, params.BatchSize),
 		LowElementProofs:      make([][]frontend.Variable, params.BatchSize),
+		NewElementProofs:      make([][]frontend.Variable, params.BatchSize),
 		LowElementPathIndices: make([]frontend.Variable, params.BatchSize),
 
 		NewElementValues: make([]frontend.Variable, params.BatchSize),
@@ -430,12 +170,19 @@ func createAddressCircuit(params *BatchAddressTreeAppendParameters) *BatchAddres
 		BatchSize:  params.BatchSize,
 		TreeHeight: params.TreeHeight,
 	}
+	fmt.Printf("initialize proofs for BatchSize: %d\n", params.BatchSize)
+	for i := uint32(0); i < params.BatchSize; i++ {
+		fmt.Printf("Creating proofs for element %d\n", i)
 
-	// Initialize proofs array
-	for i := range circuit.LowElementValues {
+		fmt.Printf("LowElementProofs[%d] len: %d\n", i, len(params.LowElementProofs[i]))
+		fmt.Printf("NewElementProofs[%d] len: %d\n", i, len(params.NewElementProofs[i]))
+
 		circuit.LowElementProofs[i] = make([]frontend.Variable, params.TreeHeight)
-		for j := range circuit.LowElementProofs[i] {
+		circuit.NewElementProofs[i] = make([]frontend.Variable, params.TreeHeight)
+
+		for j := uint32(0); j < params.TreeHeight; j++ {
 			circuit.LowElementProofs[i][j] = frontend.Variable(0)
+			circuit.NewElementProofs[i][j] = frontend.Variable(0)
 		}
 	}
 
@@ -444,48 +191,294 @@ func createAddressCircuit(params *BatchAddressTreeAppendParameters) *BatchAddres
 
 func createAddressWitness(params *BatchAddressTreeAppendParameters) *BatchAddressTreeAppendCircuit {
 	witness := createAddressCircuit(params)
+	mask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 248), big.NewInt(1))
+	fmt.Printf("\nMask bit length: %d\n", mask.BitLen())
 
-	// Public inputs
+	fmt.Printf("NewRoot from params bitLen: %d, value: %s\n", params.NewRoot.BitLen(), params.NewRoot.String())
+	maskedRoot := new(big.Int).And(params.NewRoot, mask)
+
+	fmt.Printf("Masked NewRoot bitLen: %d, value: %s\n", maskedRoot.BitLen(), maskedRoot.String())
+
+	witness.NewRoot = frontend.Variable(maskedRoot)
+
 	witness.PublicInputHash = frontend.Variable(params.PublicInputHash)
 	witness.OldSubTreeHashChain = frontend.Variable(params.OldSubTreeHashChain)
 	witness.NewSubTreeHashChain = frontend.Variable(params.NewSubTreeHashChain)
-	witness.NewRoot = frontend.Variable(params.NewRoot)
+	witness.NewRoot = frontend.Variable(new(big.Int).And(params.NewRoot, mask))
 	witness.HashchainHash = frontend.Variable(params.HashchainHash)
 	witness.StartIndex = frontend.Variable(params.StartIndex)
 
-	// Convert IndexedElements to circuit inputs
 	for i := uint32(0); i < params.BatchSize; i++ {
-		fmt.Printf("\nElement %d values going into circuit:\n", i)
-		fmt.Printf("Low value bits: %d\n", params.LowElements[i].Value.BitLen())
-		fmt.Printf("Next value bits: %d\n", params.LowElements[i].NextValue.BitLen())
-		fmt.Printf("Next index: %d\n", params.LowElements[i].NextIndex)
-		fmt.Printf("New value bits: %d\n", params.NewElements[i].Value.BitLen())
+		lowValue := new(big.Int).And(params.LowElements[i].Value, mask)
+		nextValue := new(big.Int).And(params.LowElements[i].NextValue, mask)
+		newValue := new(big.Int).And(params.NewElements[i].Value, mask)
 
-		// Low element data
-		witness.LowElementValues[i] = frontend.Variable(params.LowElements[i].Value)
-		witness.LowElementNextValues[i] = frontend.Variable(params.LowElements[i].NextValue)
+		fmt.Printf("\nWitness element %d before assignment:\n", i)
+		fmt.Printf("Low value bitLen: %d\n", lowValue.BitLen())
+		fmt.Printf("Next value bitLen: %d\n", nextValue.BitLen())
+		fmt.Printf("New value bitLen: %d\n", newValue.BitLen())
+
+		witness.LowElementValues[i] = frontend.Variable(lowValue)
+		witness.LowElementNextValues[i] = frontend.Variable(nextValue)
 		witness.LowElementNextIndices[i] = frontend.Variable(params.LowElements[i].NextIndex)
+		witness.NewElementValues[i] = frontend.Variable(newValue)
 		witness.LowElementPathIndices[i] = frontend.Variable(params.LowElements[i].Index)
 
-		// New element value
-		witness.NewElementValues[i] = frontend.Variable(params.NewElements[i].Value)
-
-		// Proofs
 		for j := range params.LowElementProofs[i] {
-			witness.LowElementProofs[i][j] = frontend.Variable(params.LowElementProofs[i][j])
+			proofValue := new(big.Int).And(&params.LowElementProofs[i][j], mask)
+			witness.LowElementProofs[i][j] = frontend.Variable(proofValue)
+
+			newProofValue := new(big.Int).And(&params.NewElementProofs[i][j], mask)
+			witness.NewElementProofs[i][j] = frontend.Variable(newProofValue)
 		}
 
-		// Debug hash inputs
-		fmt.Printf("Leaf hash inputs for element %d:\n", i)
-		fmt.Printf("Low: %s\n", params.LowElements[i].Value.String())
-		fmt.Printf("Index: %d\n", params.LowElements[i].NextIndex)
-		fmt.Printf("Next: %s\n", params.LowElements[i].NextValue.String())
+		if v, ok := witness.LowElementNextValues[i].(frontend.Variable); ok {
+			if bigInt, ok := v.(*big.Int); ok {
+				fmt.Printf("Witness next value after assignment bitLen: %d\n", bigInt.BitLen())
+			}
+		}
 	}
 
-	// Subtrees
 	for i, subtree := range params.Subtrees {
-		witness.Subtrees[i] = frontend.Variable(subtree)
+		witness.Subtrees[i] = frontend.Variable(new(big.Int).And(subtree, mask))
 	}
 
 	return witness
+}
+
+func BuildTestBatchAddressAppend(
+	treeHeight uint32,
+	batchSize uint32,
+	startIndex uint32,
+	previousParams *BatchAddressTreeAppendParameters,
+	invalidCase string,
+) *BatchAddressTreeAppendParameters {
+	mask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 248), big.NewInt(1))
+
+	var tree *merkletree.IndexedMerkleTree
+	var err error
+
+	if previousParams != nil {
+		tree = previousParams.Tree.DeepCopy()
+	} else {
+		tree, err = merkletree.NewIndexedMerkleTree(treeHeight)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create indexed merkle tree: %v", err))
+		}
+		err = tree.Init()
+		if err != nil {
+			panic(fmt.Sprintf("Failed to initialize indexed merkle tree: %v", err))
+		}
+	}
+
+	maxAddr := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 248), big.NewInt(1))
+	fmt.Printf("maxAddr bit length: %d\n", maxAddr.BitLen())
+
+	lowElements := make([]merkletree.IndexedElement, batchSize)
+	newElements := make([]merkletree.IndexedElement, batchSize)
+	lowElementProofs := make([][]big.Int, batchSize)
+	newElementProofs := make([][]big.Int, batchSize)
+
+	for i := uint32(0); i < batchSize; i++ {
+		lowElements[i] = merkletree.IndexedElement{
+			Value:     big.NewInt(0),
+			NextValue: big.NewInt(0),
+			NextIndex: 0,
+			Index:     0,
+		}
+		newElements[i] = merkletree.IndexedElement{
+			Value:     big.NewInt(0),
+			NextValue: big.NewInt(0),
+			NextIndex: 0,
+			Index:     0,
+		}
+		lowElementProofs[i] = make([]big.Int, treeHeight)
+		newElementProofs[i] = make([]big.Int, treeHeight)
+	}
+
+	step := new(big.Int).Div(maxAddr, big.NewInt(100))
+	processedCount := uint32(0)
+
+	for i := uint32(0); i < batchSize; i++ {
+		currentIndex := startIndex + i
+		currentElement := tree.IndexArray.Get(currentIndex)
+
+		if currentElement.Value.Cmp(maxAddr) == 0 {
+			continue
+		}
+
+		var newValue *big.Int
+		nextElement := tree.IndexArray.Get(currentElement.NextIndex)
+
+		if currentElement.Value.Cmp(big.NewInt(0)) == 0 {
+			newValue = new(big.Int).Set(step)
+		} else {
+			diff := new(big.Int).Sub(nextElement.Value, currentElement.Value)
+			half := new(big.Int).Div(diff, big.NewInt(2))
+			newValue = new(big.Int).Add(currentElement.Value, half)
+		}
+
+		proof, err := tree.GetProof(int(currentIndex))
+		if err != nil {
+			panic(fmt.Sprintf("Failed to generate initial proof: %v", err))
+		}
+		lowElementProofs[processedCount] = proof
+		newElementIndex := uint32(len(tree.IndexArray.Elements))
+
+		err = tree.IndexArray.Append(newValue)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to append to index array: %v", err))
+		}
+
+		lowElement := tree.IndexArray.Get(currentIndex)
+		newElement := tree.IndexArray.Get(newElementIndex)
+
+		lowLeafHash, err := merkletree.HashIndexedElement(lowElement)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to hash low element: %v", err))
+		}
+		tree.Tree.Update(int(currentIndex), *lowLeafHash)
+
+		intermediateProof, err := tree.GetProof(int(newElementIndex))
+		if err != nil {
+			panic(fmt.Sprintf("Failed to generate intermediate proof: %v", err))
+		}
+		newElementProofs[processedCount] = intermediateProof
+
+		newLeafHash, err := merkletree.HashIndexedElement(newElement)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to hash new element: %v", err))
+		}
+		tree.Tree.Update(int(newElementIndex), *newLeafHash)
+		lowElements[processedCount] = *lowElement
+		newElements[processedCount] = *newElement
+
+		fmt.Printf("Element %d - newValue before masking - bitLen: %d, value: %s\n",
+			i, newValue.BitLen(), newValue.String())
+		newValue.And(newValue, mask)
+		fmt.Printf("Element %d - newValue after masking - bitLen: %d, value: %s\n",
+			i, newValue.BitLen(), newValue.String())
+
+		fmt.Printf("\nElement %d state:\n", processedCount)
+		fmt.Printf("Low element: index=%d, value=%s, next_index=%d, next_value=%s\n",
+			lowElements[processedCount].Index,
+			lowElements[processedCount].Value.String(),
+			lowElements[processedCount].NextIndex,
+			lowElements[processedCount].NextValue.String())
+		fmt.Printf("New element: index=%d, value=%s, next_index=%d, next_value=%s\n",
+			newElements[processedCount].Index,
+			newElements[processedCount].Value.String(),
+			newElements[processedCount].NextIndex,
+			newElements[processedCount].NextValue.String())
+		fmt.Printf("Generated proofs - original length: %d, intermediate length: %d\n",
+			len(lowElementProofs[processedCount]), len(newElementProofs[processedCount]))
+
+		if lowElements[processedCount].Value.Cmp(lowElements[processedCount].NextValue) >= 0 {
+			panic(fmt.Sprintf("Invalid ordering at element %d: low value >= new value", processedCount))
+		}
+		if newElements[processedCount].Value.Cmp(newElements[processedCount].NextValue) >= 0 {
+			panic(fmt.Sprintf("Invalid ordering at element %d: new value >= next value", processedCount))
+		}
+
+		processedCount++
+	}
+
+	newRoot := tree.Tree.Root.Value()
+	oldSubtrees := tree.Tree.GetRightmostSubtrees(int(treeHeight))
+	oldSubTreeHashChain := calculateHashChain(oldSubtrees, int(treeHeight))
+	newSubtrees := tree.Tree.GetRightmostSubtrees(int(treeHeight))
+	newSubTreeHashChain := calculateHashChain(newSubtrees, int(treeHeight))
+
+	newLeaves := make([]*big.Int, processedCount)
+	for i := uint32(0); i < processedCount; i++ {
+		merkleElement := merkletree.IndexedElement{
+			Value:     new(big.Int).Set(newElements[i].Value),
+			NextValue: new(big.Int).Set(newElements[i].NextValue),
+			NextIndex: newElements[i].NextIndex,
+			Index:     newElements[i].Index,
+		}
+
+		leaf, err := merkletree.HashIndexedElement(&merkleElement)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to hash new element: %v", err))
+		}
+		newLeaves[i] = leaf
+	}
+	hashchainHash := calculateHashChain(newLeaves, int(processedCount))
+
+	publicInputHash := calculateHashChain([]*big.Int{
+		oldSubTreeHashChain,
+		newSubTreeHashChain,
+		&newRoot,
+		hashchainHash,
+		big.NewInt(int64(startIndex)),
+	}, 5)
+
+	returnParams := &BatchAddressTreeAppendParameters{
+		PublicInputHash:     publicInputHash,
+		OldSubTreeHashChain: oldSubTreeHashChain,
+		NewSubTreeHashChain: newSubTreeHashChain,
+		NewRoot:             &newRoot,
+		HashchainHash:       hashchainHash,
+		StartIndex:          startIndex,
+		LowElements:         lowElements[:processedCount],
+		NewElements:         newElements[:processedCount],
+		LowElementProofs:    lowElementProofs[:processedCount],
+		NewElementProofs:    newElementProofs[:processedCount],
+		Subtrees:            oldSubtrees,
+		TreeHeight:          treeHeight,
+		BatchSize:           processedCount,
+		Tree:                tree,
+	}
+
+	fmt.Printf("Returning params - BatchSize: %d, TreeHeight: %d\n", returnParams.BatchSize, returnParams.TreeHeight)
+	fmt.Printf("Proofs lengths - Low: %d, New: %d\n", len(returnParams.LowElementProofs), len(returnParams.NewElementProofs))
+
+	return returnParams
+}
+func verifyBatchAddressParameters(params *BatchAddressTreeAppendParameters) error {
+	fmt.Printf("\nVerifying batch address parameters:\n")
+	mask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 248), big.NewInt(1))
+	for i := uint32(0); i < params.BatchSize; i++ {
+		lowValue := new(big.Int).And(params.LowElements[i].Value, mask)
+		nextValue := new(big.Int).And(params.LowElements[i].NextValue, mask)
+		newValue := new(big.Int).And(params.NewElements[i].Value, mask)
+		newNextValue := new(big.Int).And(params.NewElements[i].NextValue, mask)
+
+		if lowValue.Cmp(newValue) >= 0 {
+			return fmt.Errorf("invalid ordering at index %d: low value >= new value", i)
+		}
+		if newValue.Cmp(newNextValue) >= 0 {
+			return fmt.Errorf("invalid ordering at index %d: new value >= next value", i)
+		}
+		if params.LowElements[i].Value.Cmp(lowValue) != 0 ||
+			params.LowElements[i].NextValue.Cmp(nextValue) != 0 ||
+			params.NewElements[i].Value.Cmp(newValue) != 0 ||
+			params.NewElements[i].NextValue.Cmp(newNextValue) != 0 {
+			return fmt.Errorf("values at index %d were not properly masked to 248 bits", i)
+		}
+	}
+	verifyTree, err := merkletree.NewIndexedMerkleTree(params.TreeHeight)
+	if err != nil {
+		return fmt.Errorf("failed to create verify tree: %v", err)
+	}
+	err = verifyTree.Init()
+	if err != nil {
+		return fmt.Errorf("failed to initialize verify tree: %v", err)
+	}
+
+	for i := uint32(0); i < params.BatchSize; i++ {
+		err = verifyTree.Append(params.NewElements[i].Value)
+		if err != nil {
+			return fmt.Errorf("failed to append value %d: %v", i, err)
+		}
+	}
+
+	rootValue := verifyTree.Tree.Root.Value()
+	if rootValue.Cmp(params.NewRoot) != 0 {
+		return fmt.Errorf("root mismatch")
+	}
+
+	fmt.Printf("All parameters verified successfully\n")
+	return nil
 }

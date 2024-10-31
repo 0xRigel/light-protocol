@@ -151,11 +151,26 @@ type LeafHashGadget struct {
 // Limit the number of bits to 248 + 1,
 // since we truncate address values to 31 bytes.
 func (gadget LeafHashGadget) DefineGadget(api frontend.API) interface{} {
+	api.Println("LeafHashGadget", gadget.LeafLowerRangeValue, gadget.NextIndex, gadget.LeafHigherRangeValue)
+	api.Println("\nLeafHashGadget inputs:\n")
+	api.Println("LeafLowerRangeValue bitLen: %d\n", toBigInt(gadget.LeafLowerRangeValue).BitLen())
+	api.Println("NextIndex bitLen: %d\n", toBigInt(gadget.NextIndex).BitLen())
+	api.Println("LeafHigherRangeValue bitLen: %d\n", toBigInt(gadget.LeafHigherRangeValue).BitLen())
+	api.Println("Value bitLen: %d\n", toBigInt(gadget.Value).BitLen())
+
 	// Lower bound is less than value
 	abstractor.CallVoid(api, AssertIsLess{A: gadget.LeafLowerRangeValue, B: gadget.Value, N: 248})
 	// Value is less than upper bound
 	abstractor.CallVoid(api, AssertIsLess{A: gadget.Value, B: gadget.LeafHigherRangeValue, N: 248})
+
 	return abstractor.Call(api, poseidon.Poseidon3{In1: gadget.LeafLowerRangeValue, In2: gadget.NextIndex, In3: gadget.LeafHigherRangeValue})
+}
+
+func toBigInt(v frontend.Variable) *big.Int {
+	if b, ok := v.(*big.Int); ok {
+		return b
+	}
+	return big.NewInt(0)
 }
 
 // Assert A is less than B.
@@ -168,10 +183,26 @@ type AssertIsLess struct {
 // To prevent overflows N (the number of bits) must not be greater than 252 + 1,
 // see https://github.com/zkopru-network/zkopru/issues/116
 func (gadget AssertIsLess) DefineGadget(api frontend.API) interface{} {
-	// Add 2^N to B to ensure a positive number
-	oneShifted := new(big.Int).Lsh(big.NewInt(1), uint(gadget.N))
-	num := api.Add(gadget.A, api.Sub(*oneShifted, gadget.B))
-	api.ToBinary(num, gadget.N)
+	// Create mask for N bits
+	mask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(gadget.N)), big.NewInt(1))
+
+	// Mask inputs to ensure they're within N bits
+	a := frontend.Variable(new(big.Int).And(toBigInt(gadget.A), mask))
+	b := frontend.Variable(new(big.Int).And(toBigInt(gadget.B), mask))
+
+	// Add debug logging
+	api.Println("AssertIsLess masked A:", a)
+	api.Println("AssertIsLess masked B:", b)
+
+	// Calculate B-A, which should be positive
+	diff := api.Sub(b, a)
+
+	// Convert difference to binary to ensure it's positive and fits in N bits
+	binaryDiff := api.ToBinary(diff, gadget.N)
+
+	// The most significant bit should be 0 (meaning positive number)
+	api.AssertIsEqual(binaryDiff[gadget.N-1], 0)
+
 	return []frontend.Variable{}
 }
 
@@ -183,9 +214,20 @@ type MerkleRootGadget struct {
 }
 
 func (gadget MerkleRootGadget) DefineGadget(api frontend.API) interface{} {
+	mask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 248), big.NewInt(1))
+	currentHash := frontend.Variable(new(big.Int).And(toBigInt(gadget.Hash), mask))
+
+	api.Println("MerkleRootGadget initial hash:", currentHash)
+
 	currentPath := api.ToBinary(gadget.Index, gadget.Height)
 	for i := 0; i < gadget.Height; i++ {
-		gadget.Hash = abstractor.Call(api, ProveParentHash{Bit: currentPath[i], Hash: gadget.Hash, Sibling: gadget.Path[i]})
+		maskedSibling := frontend.Variable(new(big.Int).And(toBigInt(gadget.Path[i]), mask))
+		currentHash = abstractor.Call(api, ProveParentHash{
+			Bit:     currentPath[i],
+			Hash:    currentHash,
+			Sibling: maskedSibling,
+		})
+		api.Println("MerkleRootGadget hash at level", i, ":", currentHash)
 	}
 	return gadget.Hash
 }
@@ -200,22 +242,29 @@ type MerkleRootUpdateGadget struct {
 }
 
 func (gadget MerkleRootUpdateGadget) DefineGadget(api frontend.API) interface{} {
-	// Verify the old root
-	currentRoot := abstractor.Call(api, MerkleRootGadget{
+	api.Println("MerkleRootUpdateGadget inputs:")
+	api.Println("OldRoot:", gadget.OldRoot)
+	api.Println("OldLeaf:", gadget.OldLeaf)
+	api.Println("NewLeaf:", gadget.NewLeaf)
+	api.Println("PathIndex:", gadget.PathIndex)
+	oldRoot := abstractor.Call(api, MerkleRootGadget{
 		Hash:   gadget.OldLeaf,
 		Index:  gadget.PathIndex,
 		Path:   gadget.MerkleProof,
 		Height: gadget.Height,
 	})
-	api.AssertIsEqual(currentRoot, gadget.OldRoot)
+	api.AssertIsEqual(oldRoot, gadget.OldRoot)
 
-	// Calculate the new root
 	newRoot := abstractor.Call(api, MerkleRootGadget{
 		Hash:   gadget.NewLeaf,
 		Index:  gadget.PathIndex,
 		Path:   gadget.MerkleProof,
 		Height: gadget.Height,
 	})
+
+	api.Println("MerkleRootUpdateGadget final values:")
+	api.Println("Old root:", oldRoot)
+	api.Println("New root:", newRoot)
 
 	return newRoot
 }

@@ -8,9 +8,9 @@ import (
 )
 
 type IndexedArray struct {
-	elements         []IndexedElement
-	currentNodeIndex uint32
-	highestNodeIndex uint32
+	Elements         []IndexedElement
+	CurrentNodeIndex uint32
+	HighestNodeIndex uint32
 }
 
 type IndexedElement struct {
@@ -27,26 +27,33 @@ type IndexedElementBundle struct {
 }
 
 type IndexedMerkleTree struct {
-	tree       *PoseidonTree
-	indexArray *IndexedArray
+	Tree       *PoseidonTree
+	IndexArray *IndexedArray
+}
+
+const MaxBits = 248
+
+func trimValue(value *big.Int) *big.Int {
+	mask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), MaxBits), big.NewInt(1))
+	return new(big.Int).And(value, mask)
 }
 
 func NewIndexedMerkleTree(height uint32) (*IndexedMerkleTree, error) {
 	tree := NewTree(int(height))
 	indexArray := &IndexedArray{
-		elements: []IndexedElement{{
+		Elements: []IndexedElement{{
 			Value:     big.NewInt(0),
 			NextValue: big.NewInt(0),
 			NextIndex: 0,
 			Index:     0,
 		}},
-		currentNodeIndex: 0,
-		highestNodeIndex: 0,
+		CurrentNodeIndex: 0,
+		HighestNodeIndex: 0,
 	}
 
 	return &IndexedMerkleTree{
-		tree:       &tree,
-		indexArray: indexArray,
+		Tree:       &tree,
+		IndexArray: indexArray,
 	}, nil
 }
 
@@ -55,6 +62,9 @@ func (ia *IndexedArray) Init() error {
 	if !ok {
 		return fmt.Errorf("failed to parse HIGHEST_ADDRESS_PLUS_ONE")
 	}
+
+	// Trim maxAddr to 248 bits
+	maxAddr = trimValue(maxAddr)
 
 	bundle := IndexedElementBundle{
 		NewLowElement: IndexedElement{
@@ -72,32 +82,35 @@ func (ia *IndexedArray) Init() error {
 		NewElementNextValue: big.NewInt(0),
 	}
 
-	ia.elements = []IndexedElement{bundle.NewLowElement, bundle.NewElement}
-	ia.currentNodeIndex = 1
-	ia.highestNodeIndex = 1
+	ia.Elements = []IndexedElement{bundle.NewLowElement, bundle.NewElement}
+	ia.CurrentNodeIndex = 1
+	ia.HighestNodeIndex = 1
 
 	return nil
 }
 
 func (ia *IndexedArray) Get(index uint32) *IndexedElement {
-	if int(index) >= len(ia.elements) {
+	if int(index) >= len(ia.Elements) {
 		return nil
 	}
-	return &ia.elements[index]
+	return &ia.Elements[index]
 }
 
 func (ia *IndexedArray) Append(value *big.Int) error {
+	// Trim input value to 248 bits
+	value = trimValue(value)
+
 	lowElementIndex := ia.findLowElementIndex(value)
-	lowElement := ia.elements[lowElementIndex]
+	lowElement := ia.Elements[lowElementIndex]
 
 	if lowElement.NextIndex != 0 {
-		nextElement := ia.elements[lowElement.NextIndex]
+		nextElement := ia.Elements[lowElement.NextIndex]
 		if value.Cmp(nextElement.Value) >= 0 {
 			return fmt.Errorf("new value must be less than next element value")
 		}
 	}
 
-	newElementIndex := uint32(len(ia.elements))
+	newElementIndex := uint32(len(ia.Elements))
 	newElement := IndexedElement{
 		Value:     value,
 		NextValue: lowElement.NextValue,
@@ -105,21 +118,23 @@ func (ia *IndexedArray) Append(value *big.Int) error {
 		Index:     newElementIndex,
 	}
 
-	ia.elements[lowElementIndex].NextIndex = newElementIndex
-	ia.elements[lowElementIndex].NextValue = value
+	ia.Elements[lowElementIndex].NextIndex = newElementIndex
+	ia.Elements[lowElementIndex].NextValue = value
 
-	ia.elements = append(ia.elements, newElement)
-	ia.currentNodeIndex = newElementIndex
+	ia.Elements = append(ia.Elements, newElement)
+	ia.CurrentNodeIndex = newElementIndex
 	if lowElement.NextIndex == 0 {
-		ia.highestNodeIndex = newElementIndex
+		ia.HighestNodeIndex = newElementIndex
 	}
 
 	return nil
 }
 func (ia *IndexedArray) findLowElementIndex(value *big.Int) uint32 {
 	maxAddr, _ := new(big.Int).SetString("452312848583266388373324160190187140051835877600158453279131187530910662655", 10)
+	// Trim maxAddr when comparing
+	maxAddr = trimValue(maxAddr)
 
-	for i, element := range ia.elements {
+	for i, element := range ia.Elements {
 		if element.Value.Cmp(maxAddr) == 0 {
 			continue
 		}
@@ -138,18 +153,18 @@ func (ia *IndexedArray) findLowElementIndex(value *big.Int) uint32 {
 }
 
 func (imt *IndexedMerkleTree) Append(value *big.Int) error {
-	lowElementIndex := imt.indexArray.findLowElementIndex(value)
-	lowElement := imt.indexArray.Get(lowElementIndex)
+	lowElementIndex := imt.IndexArray.findLowElementIndex(value)
+	lowElement := imt.IndexArray.Get(lowElementIndex)
 
 	var nextElement *IndexedElement
 	if lowElement.NextIndex != 0 {
-		nextElement = imt.indexArray.Get(lowElement.NextIndex)
+		nextElement = imt.IndexArray.Get(lowElement.NextIndex)
 		if value.Cmp(nextElement.Value) >= 0 {
 			return fmt.Errorf("new value must be less than next element value")
 		}
 	}
 
-	newElementIndex := uint32(len(imt.indexArray.elements))
+	newElementIndex := uint32(len(imt.IndexArray.Elements))
 
 	bundle := IndexedElementBundle{
 		NewLowElement: IndexedElement{
@@ -166,23 +181,23 @@ func (imt *IndexedMerkleTree) Append(value *big.Int) error {
 		},
 	}
 
-	lowLeafHash, err := hashIndexedElement(&bundle.NewLowElement)
+	lowLeafHash, err := HashIndexedElement(&bundle.NewLowElement)
 	if err != nil {
 		return fmt.Errorf("failed to hash low leaf: %v", err)
 	}
-	imt.tree.Update(int(lowElement.Index), *lowLeafHash)
+	imt.Tree.Update(int(lowElement.Index), *lowLeafHash)
 
-	newLeafHash, err := hashIndexedElement(&bundle.NewElement)
+	newLeafHash, err := HashIndexedElement(&bundle.NewElement)
 	if err != nil {
 		return fmt.Errorf("failed to hash new leaf: %v", err)
 	}
-	imt.tree.Update(int(newElementIndex), *newLeafHash)
+	imt.Tree.Update(int(newElementIndex), *newLeafHash)
 
-	imt.indexArray.elements[lowElement.Index] = bundle.NewLowElement
-	imt.indexArray.elements = append(imt.indexArray.elements, bundle.NewElement)
-	imt.indexArray.currentNodeIndex = newElementIndex
+	imt.IndexArray.Elements[lowElement.Index] = bundle.NewLowElement
+	imt.IndexArray.Elements = append(imt.IndexArray.Elements, bundle.NewElement)
+	imt.IndexArray.CurrentNodeIndex = newElementIndex
 	if lowElement.NextIndex == 0 {
-		imt.indexArray.highestNodeIndex = newElementIndex
+		imt.IndexArray.HighestNodeIndex = newElementIndex
 	}
 
 	return nil
@@ -193,6 +208,7 @@ func (imt *IndexedMerkleTree) Init() error {
 	if !ok {
 		return fmt.Errorf("failed to parse HIGHEST_ADDRESS_PLUS_ONE")
 	}
+	maxAddr = trimValue(maxAddr) // Trim before using
 
 	bundle := IndexedElementBundle{
 		NewLowElement: IndexedElement{
@@ -209,26 +225,26 @@ func (imt *IndexedMerkleTree) Init() error {
 		},
 	}
 
-	lowLeafHash, err := hashIndexedElement(&bundle.NewLowElement)
+	lowLeafHash, err := HashIndexedElement(&bundle.NewLowElement)
 	if err != nil {
 		return fmt.Errorf("failed to hash low leaf: %v", err)
 	}
-	imt.tree.Update(0, *lowLeafHash)
+	imt.Tree.Update(0, *lowLeafHash)
 
-	maxLeafHash, err := hashIndexedElement(&bundle.NewElement)
+	maxLeafHash, err := HashIndexedElement(&bundle.NewElement)
 	if err != nil {
 		return fmt.Errorf("failed to hash max leaf: %v", err)
 	}
-	imt.tree.Update(1, *maxLeafHash)
+	imt.Tree.Update(1, *maxLeafHash)
 
-	imt.indexArray.elements = []IndexedElement{bundle.NewLowElement, bundle.NewElement}
-	imt.indexArray.currentNodeIndex = 1
-	imt.indexArray.highestNodeIndex = 1
+	imt.IndexArray.Elements = []IndexedElement{bundle.NewLowElement, bundle.NewElement}
+	imt.IndexArray.CurrentNodeIndex = 1
+	imt.IndexArray.HighestNodeIndex = 1
 
 	return nil
 }
 
-func hashIndexedElement(element *IndexedElement) (*big.Int, error) {
+func HashIndexedElement(element *IndexedElement) (*big.Int, error) {
 	fmt.Printf("\nHashing element:\n")
 	fmt.Printf("Value: %s\n", element.Value.String())
 	fmt.Printf("NextIndex: %d\n", element.NextIndex)
@@ -253,4 +269,72 @@ func hashIndexedElement(element *IndexedElement) (*big.Int, error) {
 	fmt.Printf("Hash: %v\n", hashBytes)
 
 	return hash, nil
+}
+
+func (imt *IndexedMerkleTree) DeepCopy() *IndexedMerkleTree {
+	if imt == nil {
+		return nil
+	}
+	treeCopy := imt.Tree.DeepCopy()
+
+	elementsCopy := make([]IndexedElement, len(imt.IndexArray.Elements))
+	for i, element := range imt.IndexArray.Elements {
+		elementsCopy[i] = IndexedElement{
+			Value:     new(big.Int).Set(element.Value),
+			NextValue: new(big.Int).Set(element.NextValue),
+			NextIndex: element.NextIndex,
+			Index:     element.Index,
+		}
+	}
+
+	indexArrayCopy := &IndexedArray{
+		Elements:         elementsCopy,
+		CurrentNodeIndex: imt.IndexArray.CurrentNodeIndex,
+		HighestNodeIndex: imt.IndexArray.HighestNodeIndex,
+	}
+
+	return &IndexedMerkleTree{
+		Tree:       treeCopy,
+		IndexArray: indexArrayCopy,
+	}
+}
+
+func (imt *IndexedMerkleTree) GetProof(index int) ([]big.Int, error) {
+	if index >= len(imt.IndexArray.Elements) {
+		return nil, fmt.Errorf("index out of bounds: %d", index)
+	}
+
+	proof := imt.Tree.GenerateProof(index)
+	return proof, nil
+}
+
+func (imt *IndexedMerkleTree) Verify(index int, element *IndexedElement, proof []big.Int) (bool, error) {
+	leafHash, err := HashIndexedElement(element)
+	if err != nil {
+		return false, fmt.Errorf("failed to hash element: %v", err)
+	}
+
+	currentHash := leafHash
+	depth := len(proof)
+
+	for i := 0; i < depth; i++ {
+		var leftVal, rightVal *big.Int
+
+		if indexIsLeft(index, depth-i) {
+			leftVal = currentHash
+			rightVal = new(big.Int).Set(&proof[i])
+		} else {
+			leftVal = new(big.Int).Set(&proof[i])
+			rightVal = currentHash
+		}
+
+		var err error
+		currentHash, err = poseidon.Hash([]*big.Int{leftVal, rightVal})
+		if err != nil {
+			return false, fmt.Errorf("failed to hash proof element: %v", err)
+		}
+	}
+
+	rootValue := imt.Tree.Root.Value()
+	return currentHash.Cmp(&rootValue) == 0, nil
 }

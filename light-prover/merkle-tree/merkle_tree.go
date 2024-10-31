@@ -104,6 +104,7 @@ func NewTree(depth int) PoseidonTree {
 		val, _ := poseidon.Hash([]*big.Int{&initHashes[i-1], &initHashes[i-1]})
 		initHashes[i] = *val
 		fmt.Printf("Empty hash at depth %d: %s\n", i, val.Text(16))
+		fmt.Printf("Empty hash at depth %d (decimal): %s\n", i, val.Text(10))
 	}
 
 	return PoseidonTree{
@@ -259,4 +260,10 @@ func (node *PoseidonFullNode) withValue(index int, val big.Int) PoseidonNode {
 	result.val = *newHash
 
 	return result
+}
+
+func (tree *PoseidonTree) GenerateProof(index int) []big.Int {
+	proof := make([]big.Int, tree.Root.depth())
+	tree.Root.writeProof(index, proof)
+	return proof
 }

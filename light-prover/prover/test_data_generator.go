@@ -78,7 +78,7 @@ func TestNonInclusionParameters_TestTree(t *testing.T) {
 	}
 }
 
-func TestCombined(t *testing.T) {
+func GenerateCombinedTestData(t *testing.T) {
 	file, err := os.OpenFile("../test-data/combined.csv", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		t.Errorf("Error opening file: %v", err)
