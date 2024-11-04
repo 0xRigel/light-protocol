@@ -27,9 +27,11 @@ class StartProver extends Command {
         "non-inclusion",
         "combined",
         "append",
+        "append2",
         "update",
         "append-test",
-        "update-test",
+        "append2-test",
+        "update-test"
       ],
       multiple: true,
       required: false,
