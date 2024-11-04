@@ -31,7 +31,7 @@ class StartProver extends Command {
         "update",
         "append-test",
         "append2-test",
-        "update-test"
+        "update-test",
       ],
       multiple: true,
       required: false,
