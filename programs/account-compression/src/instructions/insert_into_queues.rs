@@ -44,6 +44,7 @@ pub fn process_insert_into_queues<'a, 'b, 'c: 'info, 'info, MerkleTreeAccount: O
         );
         return err!(crate::errors::AccountCompressionErrorCode::NumberOfLeavesMismatch);
     }
+    #[cfg(feature = "light-heap")]
     light_heap::bench_sbf_start!("acp_create_queue_map");
 
     let mut queue_map = QueueMap::new();
@@ -73,13 +74,13 @@ pub fn process_insert_into_queues<'a, 'b, 'c: 'info, 'info, MerkleTreeAccount: O
             .elements
             .push(elements[i / 2]);
     }
-
+    #[cfg(feature = "light-heap")]
     light_heap::bench_sbf_end!("acp_create_queue_map");
-
     for queue_bundle in queue_map.values() {
         let rollover_fee: u64;
 
         let queue = AccountLoader::<QueueAccount>::try_from(queue_bundle.queue)?;
+        #[cfg(feature = "light-heap")]
         light_heap::bench_sbf_start!("acp_prep_insertion");
         {
             let queue = queue.load()?;
@@ -99,14 +100,19 @@ pub fn process_insert_into_queues<'a, 'b, 'c: 'info, 'info, MerkleTreeAccount: O
             let queue = queue.to_account_info();
             let mut queue = queue.try_borrow_mut_data()?;
             let mut queue = unsafe { queue_from_bytes_zero_copy_mut(&mut queue).unwrap() };
+
+            #[cfg(feature = "light-heap")]
             light_heap::bench_sbf_end!("acp_prep_insertion");
+            #[cfg(feature = "light-heap")]
             light_heap::bench_sbf_start!("acp_insert_nf_into_queue");
+
             for element in queue_bundle.elements.iter() {
                 let element = BigUint::from_bytes_be(element.as_slice());
                 queue
                     .insert(&element, sequence_number)
                     .map_err(ProgramError::from)?;
             }
+            #[cfg(feature = "light-heap")]
             light_heap::bench_sbf_end!("acp_insert_nf_into_queue");
         }
 
